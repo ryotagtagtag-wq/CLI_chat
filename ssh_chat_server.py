@@ -1,24 +1,42 @@
 import asyncio
+import logging
 import os
 import datetime
 from websockets.server import serve
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
 LOG_FILE = "messages.txt"
 MY_GLOBAL_IP = "153.191.11.135"
 
-def get_next_msg_id():
-    if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0: return 1
+
+# ------------------------------------------------------------------ #
+#  ヘルパー関数
+# ------------------------------------------------------------------ #
+
+def get_next_msg_id() -> int:
+    """ログファイルから現在の最大IDを読み取り、次のIDを返す。"""
+    if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
+        return 1
     max_id = 0
     with open(LOG_FILE, "r", encoding="utf-8") as f:
         for line in f:
-            if line.startswith("[ID:"):
+            if line.startswith("[ID: #"):
                 try:
-                    parts = line.split("]").replace("[ID: #", "")
-                    max_id = max(max_id, int(parts))
-                except: pass
+                    # "[ID: #3]" → "3"
+                    id_part = line.split("[ID: #")[1].split("]")[0]
+                    max_id = max(max_id, int(id_part))
+                except (IndexError, ValueError):
+                    pass
     return max_id + 1
 
-def check_ip_reply(client_ip):
+
+def check_ip_reply(client_ip: str) -> str | None:
+    """指定IPへの管理者返信ファイルが存在すれば内容を返す。"""
     safe_ip = client_ip.replace(".", "_").replace(":", "_")
     reply_file = f"reply_ip_{safe_ip}.txt"
     if os.path.exists(reply_file):
@@ -26,137 +44,205 @@ def check_ip_reply(client_ip):
             return f.read()
     return None
 
-client_states = {}
 
-async def handle_ws(websocket):
-    client_id = id(websocket)
-    client_states[client_id] = {"menu": "main", "target_ip": None}
-    
-    ip_address = "Unknown"
-    if hasattr(websocket, 'request_headers'):
-        forwarded = websocket.request_headers.get("X-Forwarded-For", "")
+def resolve_ip(websocket) -> str:
+    """WebSocketオブジェクトからクライアントIPを安全に取得する。"""
+    # プロキシ経由の場合は X-Forwarded-For を優先
+    try:
+        headers = websocket.request.headers
+        forwarded = headers.get("X-Forwarded-For", "")
         if forwarded:
-            ip_address = forwarded.split(",")[0].strip()
-            
-    if not ip_address or ip_address == "Unknown":
-        ip_address = websocket.remote_address
+            return forwarded.split(",")[0].strip()
+    except AttributeError:
+        pass
 
-    is_admin = (ip_address == MY_GLOBAL_IP)
+    # 直接接続の場合: remote_address は (host, port) タプル
+    addr = websocket.remote_address
+    if isinstance(addr, tuple):
+        return addr[0]
+    return str(addr) if addr else "Unknown"
 
-    if is_admin:
-        banner = (
-            "Connecting to secure-message-service... Done.\n"
-            f"Verified Administrator IP: {ip_address}\n"
-            "Authentication successful. Switching to administrative mode...\n"
-            "============================================================\n"
-            " 管理者コントロールパネル - ゲストメッセージ・IPログ一覧\n"
-            "============================================================\n"
+
+def load_log_text() -> str:
+    """ログファイルの全内容を文字列で返す（なければ空文字）。"""
+    if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
+        return ""
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+# ------------------------------------------------------------------ #
+#  管理者セッション
+# ------------------------------------------------------------------ #
+
+async def run_admin_session(websocket, ip_address: str) -> None:
+    """管理者向けのインタラクティブセッション（複数IP返信対応）。"""
+    banner = (
+        "Connecting to secure-message-service... Done.\n"
+        f"Verified Administrator IP: {ip_address}\n"
+        "Authentication successful. Switching to administrative mode...\n"
+        "============================================================\n"
+        " 管理者コントロールパネル - ゲストメッセージ・IPログ一覧\n"
+        "============================================================\n"
+    )
+    await websocket.send(banner)
+
+    log_text = load_log_text()
+    if not log_text:
+        await websocket.send("INFO: 新着メッセージ、または未処理のキューはありません。\n")
+        await websocket.send("Connection closed by remote host.\n")
+        return
+
+    await websocket.send("現在サーバー内に格納されているログ（IPアドレス付き）:\n")
+    await websocket.send(log_text.replace("\n", "\r\n") + "\n")
+
+    # 複数IPへの返信ループ
+    while True:
+        await websocket.send(
+            "[必須] 返信したい相手の『IPアドレス』を入力 / 終了するには 'exit' と入力:\n> "
         )
-        await websocket.send(banner)
-        
-        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
-            await websocket.send("現在サーバー内に格納されているログ（IPアドレス付き）:\n")
-            with open(LOG_FILE, "r", encoding="utf-8") as f:
-                await websocket.send(f.read().replace("\n", "\r\n"))
-            await websocket.send("\n[必須] 返信したい相手の『IPアドレス』をそのまま入力してください:\n> ")
-            client_states[client_id]["menu"] = "admin_select"
-        else:
-            await websocket.send("INFO: 新着メッセージ、または未処理のキューはありません。\n")
-            await websocket.send("Connection closed by remote host.\n")
-            await websocket.close()
+        target_ip = (await websocket.recv()).strip()
+
+        if target_ip.lower() == "exit":
+            await websocket.send("セッションを終了します。Goodbye.\n")
+            break
+
+        if not target_ip:
+            await websocket.send("エラー: IPアドレスを入力してください。\n")
+            continue
+
+        await websocket.send(f"\nIP: {target_ip} への応答テキストを入力してください:\n> ")
+        reply_text = (await websocket.recv()).strip()
+
+        if not reply_text:
+            await websocket.send("エラー: 返信内容が空です。スキップします。\n")
+            continue
+
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        safe_target_ip = target_ip.replace(".", "_").replace(":", "_")
+        with open(f"reply_ip_{safe_target_ip}.txt", "w", encoding="utf-8") as f:
+            f.write(f"[{now}] 応答: {reply_text}\n")
+
+        await websocket.send(
+            f"\nデータ更新完了。IP: {target_ip} に応答データをバインドしました。\n"
+        )
+
+
+# ------------------------------------------------------------------ #
+#  ゲストセッション
+# ------------------------------------------------------------------ #
+
+async def run_guest_session(websocket, ip_address: str) -> None:
+    """ゲスト向けのインタラクティブセッション。"""
+    banner = (
+        "Connecting to secure-message-service... Done.\n"
+        "Initializing repository setup... OK.\n"
+        "------------------------------------------------------------\n"
+        " サービス名: 匿名メッセージ共有サブシステム (v2.0.0-release)\n"
+        f" 検出されたあなたのIP: {ip_address}\n"
+        "------------------------------------------------------------\n"
+        " メニューを選択してください:\n"
+        "   1) メッセージを送信する (Send message)\n"
+        "   2) 自分への返信を確認する (Check reply)\n\n"
+        "選択してください (1-2) > "
+    )
+    await websocket.send(banner)
+
+    # メインメニュー
+    choice = (await websocket.recv()).strip()
+
+    if choice == "1":
+        await websocket.send("\nメッセージ本文を入力し、Enterキーを押してください:\n> ")
+        body = (await websocket.recv()).strip()
+
+        if not body:
+            await websocket.send("\nエラー: メッセージが空です。接続を終了します。\n")
             return
-    else:
-        banner = (
-            "Connecting to secure-message-service... Done.\n"
-            "Initializing repository setup... OK.\n"
-            "------------------------------------------------------------\n"
-            " サービス名: 匿名メッセージ共有サブシステム (v1.0.4-release)\n"
-            f" 検出されたあなたのIP: {ip_address}\n"
-            "------------------------------------------------------------\n"
-            " メニューを選択してください:\n"
-            "   1) メッセージを送信する (Send message)\n"
-            "   2) 自分への返信を確認する (Check reply)\n\n"
-            "選択してください (1-2) > "
+
+        msg_id = get_next_msg_id()
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[ID: #{msg_id}] [DATE: {now}] [IP: {ip_address}] DATA: {body}\n")
+
+        logger.info("New message #%d from %s", msg_id, ip_address)
+        await websocket.send(
+            f"\n処理が正常に完了しました (HTTP 201 Created).\n"
+            f"あなたのメッセージは受付番号 【 #{msg_id} 】 としてIPに紐付けられました。\n"
+            f"Session terminated. Closing connection...\n"
         )
-        await websocket.send(banner)
+
+    elif choice == "2":
+        reply = check_ip_reply(ip_address)
+        if reply:
+            await websocket.send(
+                "\n============================================================\n"
+                " [NOTICE] あなたのIPに対する管理者からの応答データ\n"
+                "============================================================\n"
+                f"{reply}\n"
+                "============================================================\n"
+            )
+        else:
+            await websocket.send(
+                "\nステータス: 処理待ち (あなたへの返信はまだ登録されていません)。\n"
+            )
+        await websocket.send("Session terminated. Closing connection...\n")
+
+    else:
+        await websocket.send("\nエラー: 1 または 2 を指定してください。接続を終了します。\n")
+
+
+# ------------------------------------------------------------------ #
+#  メインハンドラ
+# ------------------------------------------------------------------ #
+
+async def handle_ws(websocket) -> None:
+    """接続ごとにセッションを振り分けるメインハンドラ。"""
+    ip_address = resolve_ip(websocket)
+    is_admin = (ip_address == MY_GLOBAL_IP)
+    logger.info("New connection from %s (admin=%s)", ip_address, is_admin)
 
     try:
-        async for message in websocket:
-            input_str = message.strip()
-            state = client_states[client_id]
-            
-            if not is_admin:
-                if state["menu"] == "main":
-                    if input_str == "1":
-                        await websocket.send("\nメッセージ本文を入力し、Enterキーを押してください:\n> ")
-                        state["menu"] = "visitor_write"
-                    elif input_str == "2":
-                        has_reply = check_ip_reply(ip_address)
-                        if has_reply:
-                            await websocket.send(
-                                f"\n============================================================\n"
-                                f" 🔔 あなたのIPに対する管理者からの応答データ\n"
-                                f"============================================================\n"
-                                f"{has_reply}\n"
-                                f"============================================================\n"
-                            )
-                        else:
-                            await websocket.send("\nステータス: 処理待ち (あなたへの返信はまだ登録されていません)。\n")
-                        await websocket.send("Session terminated. Closing connection...\n")
-                        await websocket.close()
-                    else:
-                        await websocket.send("\nエラー: 1 または 2 を指定してください。\n> ")
-                        
-                elif state["menu"] == "visitor_write":
-                    if input_str:
-                        msg_id = get_next_msg_id()
-                        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        with open(LOG_FILE, "a", encoding="utf-8") as f:
-                            f.write(f"[ID: #{msg_id}] [DATE: {now}] [IP: {ip_address}] DATA: {input_str}\n")
-                        
-                        await websocket.send(
-                            f"\n処理が正常に完了しました (HTTP 201 Created).\n"
-                            f"あなたのメッセージは受付番号 【 #{msg_id} 】 としてIPに紐付けられました。\n"
-                            f"Session terminated. Closing connection...\n"
-                        )
-                        await websocket.close()
-
-            elif is_admin:
-                if state["menu"] == "admin_select":
-                    if input_str:
-                        state["target_ip"] = input_str
-                        await websocket.send(f"\nIP: {input_str} への応答テキストを入力してください:\n> ")
-                        state["menu"] = "admin_write"
-                
-                elif state["menu"] == "admin_write":
-                    if input_str and state["target_ip"]:
-                        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        safe_target_ip = state["target_ip"].replace(".", "_").replace(":", "_")
-                        with open(f"reply_ip_{safe_target_ip}.txt", "w", encoding="utf-8") as f:
-                            f.write(f"[{now}] 応答: {input_str}\n")
-                        await websocket.send(f"\nデータ更新完了。IP: {state['target_ip']} に応答データをバインドしました。\n")
-                        await websocket.close()
-                        
-    except Exception:
-        pass
+        if is_admin:
+            await run_admin_session(websocket, ip_address)
+        else:
+            await run_guest_session(websocket, ip_address)
+    except Exception as exc:
+        logger.warning("Session error for %s: %s", ip_address, exc)
     finally:
-        if client_id in client_states:
-            del client_states[client_id]
+        logger.info("Connection closed: %s", ip_address)
 
-async def http_and_ws_handler(path, request_headers):
-    if path != "/ws":
-        blank_html = "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body></body></html>"
-        return (
-            200,
-            [("Content-Type", "text/html; charset=utf-8")],
-            blank_html.encode("utf-8"),
+
+# ------------------------------------------------------------------ #
+#  HTTPリクエスト処理 (WebSocket以外)
+# ------------------------------------------------------------------ #
+
+async def http_handler(connection, request):
+    """WebSocket以外のHTTPリクエストに対して空のHTMLを返す。"""
+    if request.path != "/ws":
+        blank_html = (
+            b"<!DOCTYPE html><html>"
+            b"<head><meta charset='utf-8'></head>"
+            b"<body></body></html>"
+        )
+        from websockets.http11 import Response
+        return Response(
+            status_code=200,
+            headers=[("Content-Type", "text/html; charset=utf-8")],
+            body=blank_html,
         )
     return None
 
-async def main():
+
+# ------------------------------------------------------------------ #
+#  エントリポイント
+# ------------------------------------------------------------------ #
+
+async def main() -> None:
     port = int(os.environ.get("PORT", 10000))
-    async with serve(handle_ws, "0.0.0.0", port, process_request=http_and_ws_handler):
+    logger.info("Starting WebSocket server on port %d", port)
+    async with serve(handle_ws, "0.0.0.0", port, process_request=http_handler):
         await asyncio.Future()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
