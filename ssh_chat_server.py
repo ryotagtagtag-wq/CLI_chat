@@ -340,25 +340,15 @@ async def handle_ws(websocket) -> None:
 #  HTTPリクエスト処理 (WebSocket以外)
 # ------------------------------------------------------------------ #
 
+# ------------------------------------------------------------------ #
+#  HTTPリクエスト処理 (WebSocket以外)
+# ------------------------------------------------------------------ #
+
 async def http_handler(path, request_headers):
-    """WebSocket以外のHTTPリクエストに応答。"""
-    from websockets.http11 import Response
-
-    if path == "/health":
-        return Response(
-            status_code=200,
-            headers=[("Content-Type", "text/plain; charset=utf-8")],
-            body=b"OK",
-        )
-
-    if path != "/ws":
-        return Response(
-            status_code=200,
-            headers=[("Content-Type", "text/html; charset=utf-8")],
-            body=b"<!DOCTYPE html><html><head><meta charset='utf-8'></head><body></body></html>",
-        )
-
+    """WebSocket以外は無視（何も返さない）。"""
+    # None を返すだけで、接続は閉じられる
     return None
+
 
 # ------------------------------------------------------------------ #
 #  グレースフルシャットダウン
