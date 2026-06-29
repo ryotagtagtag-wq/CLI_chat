@@ -132,13 +132,13 @@ async def run_admin_session(websocket, ip: str) -> None:
             for m in msgs: await websocket.send(f"  {m}\n")
 
     while True:
-        await websocket.send("\n返信対象のユーザー名を入力 (exitで終了):\n> ")
+        await websocket.send("\n返信対象のユーザー名を入力 (exitで終了):")
         target = (await websocket.recv()).strip()
         if target.lower() == "exit": break
         if target not in usernames:
             await websocket.send("そのユーザーはいません。\n")
             continue
-        await websocket.send(f"'{target}' への返信内容:\n> ")
+        await websocket.send(f"'{target}' への返信内容:")
         reply = (await websocket.recv()).strip()
         save_username_reply(target, reply)
         await websocket.send("返信を保存しました。\n")
@@ -177,15 +177,31 @@ async def handle_ws(websocket) -> None:
     else:
         await run_guest_session(websocket, ip)
 
-# HTTPアクセス（死活監視）が来たら 200 OK を返すヘルパー関数
-def handle_http_request(connection, request):
-    if "Upgrade" not in request.headers:
-        return http.HTTPStatus.OK, [], b"OK"
+# ------------------------------------------------------------------ #
+#  HTTP & WebSocket Request Handler
+# ------------------------------------------------------------------ #
+
+def handle_http_request(path: str, request_headers):
+    """
+    HTTPアクセス（死活監視）が来たら 200 OK を返すヘルパー関数。
+    引数 request_headers はライブラリ独自の Headers オブジェクト（辞書のように扱える）です。
+    """
+    # ヘッダーに 'Upgrade' が含まれていない場合は通常のHTTPアクセス（死活監視）とみなす
+    if "Upgrade" not in request_headers:
+        # 200 OK と適当なテキストを返して、通信を正常に終了させる
+        return http.HTTPStatus.OK, [("Content-Type", "text/plain")], b"OK"
+        
+    # WebSocket要求（Upgradeヘッダーあり）の場合は、Noneを返して通常通り handle_ws へパスする
     return None
 
 async def main() -> None:
-    # process_request オプションを追加して入れ替え
-    async with serve(handle_ws, "0.0.0.0", PORT, process_request=handle_http_request):
+    # process_request オプションを追加
+    async with serve(
+        handle_ws, 
+        "0.0.0.0", 
+        PORT, 
+        process_request=handle_http_request
+    ):
         await asyncio.get_running_loop().create_future()
 
 if __name__ == "__main__":
