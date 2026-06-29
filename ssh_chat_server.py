@@ -17,6 +17,7 @@ from typing import Optional
 
 from websockets.server import serve
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
+from websockets.http11 import Response
 
 # ------------------------------------------------------------------ #
 #  設定 / ロギング
@@ -349,6 +350,10 @@ async def http_handler(connection, request):
     websockets >= 11.0 のAPI仕様 (connection, request) に対応。
     None を返すと通常のWebSocketハンドシェイクが継続される。
     """
+    # ロードバランサー等の HTTP ヘルスチェック応答用 (200 OK を返す)
+    if request.headers.get("Upgrade", "").lower() != "websocket":
+        return Response(200, "OK", [("Content-Type", "text/plain")], b"Health Check OK\n")
+        
     return None
 
 
