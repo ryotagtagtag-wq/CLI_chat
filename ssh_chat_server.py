@@ -340,7 +340,7 @@ async def handle_ws(websocket) -> None:
 #  HTTPリクエスト処理 (WebSocket以外)
 # ------------------------------------------------------------------ #
 
-async def http_handler(connection, request):
+async def http_handler(request):
     """/health はヘルスチェック用、それ以外のHTTPは空ページを返す。"""
     from websockets.http11 import Response
 
