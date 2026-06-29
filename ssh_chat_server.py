@@ -25,27 +25,27 @@ from websockets.server import serve
 
 MESSAGES = {
     "en": {
-        "select_lang": "Select Language: 1) English, 2) 日本語\n> ",
+        "select_lang": "Select Language: 1) English, 2) 日本語",
         "welcome": "Welcome to Anonymous Message System v2.0",
         "ip_label": "Your IP: ",
-        "user_prompt": "Username (1-20 chars):\n> ",
+        "user_prompt": "Username (1-20 chars)",
         "welcome_back": "Welcome back, {name}!",
         "hello": "Hello, {name}!",
-        "menu": "Menu: 1) Send Message, 2) Check Replies\n> ",
-        "msg_prompt": "Enter your message:\n> ",
+        "menu": "Menu: 1) Send Message, 2) Check Replies",
+        "msg_prompt": "Enter your message:",
         "msg_sent": "Message sent successfully.",
         "no_replies": "No new replies.",
         "reply_header": "Reply:"
     },
     "ja": {
-        "select_lang": "言語を選択してください: 1) English, 2) 日本語\n> ",
+        "select_lang": "言語を選択してください: 1) English, 2) 日本語",
         "welcome": "匿名メッセージシステム v2.0 へようこそ",
         "ip_label": "あなたのIP: ",
-        "user_prompt": "ユーザー名 (1-20文字):\n> ",
+        "user_prompt": "ユーザー名 (1-20文字):",
         "welcome_back": "おかえりなさい、{name}さん！",
         "hello": "こんにちは、{name}さん！",
-        "menu": "メニュー: 1) メッセージ送信, 2) 返信を確認\n> ",
-        "msg_prompt": "メッセージを入力してください:\n> ",
+        "menu": "メニュー: 1) メッセージ送信, 2) 返信を確認",
+        "msg_prompt": "メッセージを入力してください:",
         "msg_sent": "メッセージを送信しました。",
         "no_replies": "新しい返信はありません。",
         "reply_header": "返信:"
