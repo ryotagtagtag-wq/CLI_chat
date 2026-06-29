@@ -4,7 +4,7 @@ import datetime
 from websockets.server import serve
 
 LOG_FILE = "messages.txt"
-MY_GLOBAL_IP = "あなたのグローバルIPアドレスをここに貼り付けてください"
+MY_GLOBAL_IP = "153.191.11.135"
 
 def get_next_msg_id():
     if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0: return 1
