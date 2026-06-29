@@ -177,8 +177,15 @@ async def handle_ws(websocket) -> None:
     else:
         await run_guest_session(websocket, ip)
 
+# HTTPアクセス（死活監視）が来たら 200 OK を返すヘルパー関数
+def handle_http_request(connection, request):
+    if "Upgrade" not in request.headers:
+        return http.HTTPStatus.OK, [], b"OK"
+    return None
+
 async def main() -> None:
-    async with serve(handle_ws, "0.0.0.0", PORT):
+    # process_request オプションを追加して入れ替え
+    async with serve(handle_ws, "0.0.0.0", PORT, process_request=handle_http_request):
         await asyncio.get_running_loop().create_future()
 
 if __name__ == "__main__":
