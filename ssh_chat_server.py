@@ -340,18 +340,18 @@ async def handle_ws(websocket) -> None:
 #  HTTPリクエスト処理 (WebSocket以外)
 # ------------------------------------------------------------------ #
 
-async def http_handler(request):
-    """/health はヘルスチェック用、それ以外のHTTPは空ページを返す。"""
+async def http_handler(path, request_headers):
+    """WebSocket以外のHTTPリクエストに応答。"""
     from websockets.http11 import Response
 
-    if request.path == "/health":
+    if path == "/health":
         return Response(
             status_code=200,
             headers=[("Content-Type", "text/plain; charset=utf-8")],
             body=b"OK",
         )
 
-    if request.path != "/ws":
+    if path != "/ws":
         return Response(
             status_code=200,
             headers=[("Content-Type", "text/html; charset=utf-8")],
@@ -359,7 +359,6 @@ async def http_handler(request):
         )
 
     return None
-
 
 # ------------------------------------------------------------------ #
 #  グレースフルシャットダウン
