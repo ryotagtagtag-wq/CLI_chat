@@ -27,7 +27,6 @@ def get_next_msg_id() -> int:
         for line in f:
             if line.startswith("[ID: #"):
                 try:
-                    # "[ID: #3]" → "3"
                     id_part = line.split("[ID: #")[1].split("]")[0]
                     max_id = max(max_id, int(id_part))
                 except (IndexError, ValueError):
@@ -35,18 +34,8 @@ def get_next_msg_id() -> int:
     return max_id + 1
 
 
-def check_ip_reply(client_ip: str) -> str | None:
-    """指定IPへの管理者返信ファイルが存在すれば内容を返す。"""
-    safe_ip = client_ip.replace(".", "_").replace(":", "_")
-    reply_file = f"reply_ip_{safe_ip}.txt"
-    if os.path.exists(reply_file):
-        with open(reply_file, "r", encoding="utf-8") as f:
-            return f.read()
-    return None
-
-
-def username_taken(username: str) -> bool:
-    """同名ユーザーが既にログに存在するか確認する。"""
+def username_exists(username: str) -> bool:
+    """指定ユーザー名がログに1件以上存在するか確認する。"""
     if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
         return False
     with open(LOG_FILE, "r", encoding="utf-8") as f:
@@ -56,9 +45,37 @@ def username_taken(username: str) -> bool:
     return False
 
 
+def get_messages_by_user(username: str) -> list[str]:
+    """指定ユーザーのメッセージ行をリストで返す。"""
+    result = []
+    if not os.path.exists(LOG_FILE):
+        return result
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            if f"[USER: {username}]" in line:
+                result.append(line.rstrip())
+    return result
+
+
+def get_all_usernames() -> list[str]:
+    """ログに登場する全ユーザー名を重複なしで返す（出現順）。"""
+    seen: list[str] = []
+    if not os.path.exists(LOG_FILE):
+        return seen
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            if "[USER: " in line:
+                try:
+                    name = line.split("[USER: ")[1].split("]")[0]
+                    if name not in seen:
+                        seen.append(name)
+                except IndexError:
+                    pass
+    return seen
+
+
 def resolve_ip(websocket) -> str:
     """WebSocketオブジェクトからクライアントIPを安全に取得する。"""
-    # プロキシ経由の場合は X-Forwarded-For を優先
     try:
         headers = websocket.request.headers
         forwarded = headers.get("X-Forwarded-For", "")
@@ -66,8 +83,6 @@ def resolve_ip(websocket) -> str:
             return forwarded.split(",")[0].strip()
     except AttributeError:
         pass
-
-    # 直接接続の場合: remote_address は (host, port) タプル
     addr = websocket.remote_address
     if isinstance(addr, tuple):
         return addr[0]
@@ -82,60 +97,97 @@ def load_log_text() -> str:
         return f.read()
 
 
+def check_username_reply(username: str) -> str | None:
+    """指定ユーザー名への管理者返信ファイルが存在すれば内容を返す。"""
+    safe = username.replace(" ", "_")
+    reply_file = f"reply_user_{safe}.txt"
+    if os.path.exists(reply_file):
+        with open(reply_file, "r", encoding="utf-8") as f:
+            return f.read()
+    return None
+
+
+def save_username_reply(username: str, reply_text: str) -> None:
+    """管理者の返信をユーザー名ベースのファイルに保存する。"""
+    safe = username.replace(" ", "_")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(f"reply_user_{safe}.txt", "w", encoding="utf-8") as f:
+        f.write(f"[{now}] 応答: {reply_text}\n")
+
+
 # ------------------------------------------------------------------ #
 #  管理者セッション
 # ------------------------------------------------------------------ #
 
 async def run_admin_session(websocket, ip_address: str) -> None:
-    """管理者向けのインタラクティブセッション（複数IP返信対応）。"""
-    banner = (
+    """管理者向けのインタラクティブセッション。"""
+    await websocket.send(
         "Connecting to secure-message-service... Done.\n"
         f"Verified Administrator IP: {ip_address}\n"
         "Authentication successful. Switching to administrative mode...\n"
         "============================================================\n"
-        " 管理者コントロールパネル - ゲストメッセージ・ユーザー名・IPログ一覧\n"
+        " 管理者コントロールパネル\n"
         "============================================================\n"
     )
-    await websocket.send(banner)
 
-    log_text = load_log_text()
-    if not log_text:
+    usernames = get_all_usernames()
+    if not usernames:
         await websocket.send("INFO: 新着メッセージ、または未処理のキューはありません。\n")
         await websocket.send("Connection closed by remote host.\n")
         return
 
-    await websocket.send("現在サーバー内に格納されているログ（IPアドレス付き）:\n")
-    await websocket.send(log_text.replace("\n", "\r\n") + "\n")
+    # ユーザー名ごとにメッセージをグループ表示
+    await websocket.send(f"登録ユーザー数: {len(usernames)} 名\n\n")
+    for uname in usernames:
+        msgs = get_messages_by_user(uname)
+        await websocket.send(
+            f"------------------------------------------------------------\n"
+            f" ユーザー: {uname}  (メッセージ数: {len(msgs)})\n"
+            f"------------------------------------------------------------\n"
+        )
+        for m in msgs:
+            await websocket.send(f"  {m}\r\n")
+        await websocket.send("\n")
 
-    # 複数IPへの返信ループ
+    # 複数ユーザーへの返信ループ
     while True:
         await websocket.send(
-            "[必須] 返信したい相手の『IPアドレス』を入力 (ログの [IP: ...] を参照) / 終了するには 'exit' と入力:\n> "
+            "[返信] 返信したいユーザー名を入力 / 終了するには 'exit' と入力:\n> "
         )
-        target_ip = (await websocket.recv()).strip()
+        target = (await websocket.recv()).strip()
 
-        if target_ip.lower() == "exit":
+        if target.lower() == "exit":
             await websocket.send("セッションを終了します。Goodbye.\n")
             break
 
-        if not target_ip:
-            await websocket.send("エラー: IPアドレスを入力してください。\n")
+        if not target:
+            await websocket.send("エラー: ユーザー名を入力してください。\n")
             continue
 
-        await websocket.send(f"\nIP: {target_ip} への応答テキストを入力してください:\n> ")
+        if target not in usernames:
+            await websocket.send(
+                f"エラー: '{target}' はログに存在しません。\n"
+                f"既存ユーザー: {', '.join(usernames)}\n"
+            )
+            continue
+
+        # 対象ユーザーのメッセージを再表示してから返信入力
+        msgs = get_messages_by_user(target)
+        await websocket.send(f"\n[{target}] の送信履歴 ({len(msgs)}件):\n")
+        for m in msgs:
+            await websocket.send(f"  {m}\r\n")
+
+        await websocket.send(f"\n{target} への返信内容を入力してください:\n> ")
         reply_text = (await websocket.recv()).strip()
 
         if not reply_text:
             await websocket.send("エラー: 返信内容が空です。スキップします。\n")
             continue
 
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        safe_target_ip = target_ip.replace(".", "_").replace(":", "_")
-        with open(f"reply_ip_{safe_target_ip}.txt", "w", encoding="utf-8") as f:
-            f.write(f"[{now}] 応答: {reply_text}\n")
-
+        save_username_reply(target, reply_text)
+        logger.info("Admin replied to user '%s'", target)
         await websocket.send(
-            f"\nデータ更新完了。IP: {target_ip} に応答データをバインドしました。\n"
+            f"\n完了。'{target}' への返信データを保存しました。\n"
         )
 
 
@@ -153,20 +205,17 @@ async def run_guest_session(websocket, ip_address: str) -> None:
         " サービス名: 匿名メッセージ共有サブシステム (v2.0.0-release)\n"
         f" 検出されたあなたのIP: {ip_address}\n"
         "------------------------------------------------------------\n"
-        " ユーザー名を入力してください (1〜20文字, 英数字・記号可):\n> "
+        " ユーザー名を入力してください (1〜20文字):\n> "
     )
 
     username = ""
-    for _ in range(3):  # 最大3回試行
+    for _ in range(3):
         raw = (await websocket.recv()).strip()
         if not raw:
             await websocket.send("エラー: ユーザー名を入力してください。もう一度:\n> ")
             continue
         if len(raw) > 20:
             await websocket.send("エラー: ユーザー名は20文字以内にしてください。もう一度:\n> ")
-            continue
-        if username_taken(raw):
-            await websocket.send(f"エラー: '{raw}' はすでに使用されています。別の名前を入力してください:\n> ")
             continue
         username = raw
         break
@@ -175,11 +224,20 @@ async def run_guest_session(websocket, ip_address: str) -> None:
         await websocket.send("\nエラー: ユーザー名の設定に失敗しました。接続を終了します。\n")
         return
 
-    logger.info("Guest identified as '%s' (%s)", username, ip_address)
+    # 既存ユーザーかどうかでウェルカムメッセージを切り替え
+    is_returning = username_exists(username)
+    if is_returning:
+        past_msgs = get_messages_by_user(username)
+        await websocket.send(
+            f"\nおかえりなさい、{username} さん! (過去のメッセージ数: {len(past_msgs)}件)\n"
+        )
+    else:
+        await websocket.send(f"\nようこそ、{username} さん! (初回登録)\n")
+
+    logger.info("Guest '%s' connected (%s, returning=%s)", username, ip_address, is_returning)
 
     # --- メインメニュー ---
     await websocket.send(
-        f"\nようこそ、{username} さん!\n"
         "------------------------------------------------------------\n"
         " メニューを選択してください:\n"
         "   1) メッセージを送信する (Send message)\n"
@@ -202,15 +260,17 @@ async def run_guest_session(websocket, ip_address: str) -> None:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[ID: #{msg_id}] [DATE: {now}] [USER: {username}] [IP: {ip_address}] DATA: {body}\n")
 
-        logger.info("New message #%d from '%s' (%s)", msg_id, username, ip_address)
+        # このユーザーの通算送信回数
+        total = len(get_messages_by_user(username))
+        logger.info("Message #%d from '%s' (%s), total_by_user=%d", msg_id, username, ip_address, total)
         await websocket.send(
             f"\n処理が正常に完了しました (HTTP 201 Created).\n"
-            f"あなたのメッセージは受付番号 【 #{msg_id} 】 として {username} に紐付けられました。\n"
+            f"受付番号 【 #{msg_id} 】  {username} さんの通算 {total} 件目のメッセージです。\n"
             f"Session terminated. Closing connection...\n"
         )
 
     elif choice == "2":
-        reply = check_ip_reply(ip_address)
+        reply = check_username_reply(username)
         if reply:
             await websocket.send(
                 "\n============================================================\n"
